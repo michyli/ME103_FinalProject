@@ -11,7 +11,8 @@ for wheel rolling experiments, including:
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import linregress
+from scipy.stats import linregress, t as t_dist
+from scipy.interpolate import interp1d
 from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
@@ -444,8 +445,18 @@ def plot_full_experiment(all_sensor_data, time_full, filename=None, save=None, e
         
         if speed_poly_coeffs is not None:
             speed_fit = np.polyval(speed_poly_coeffs, t_plot)
+            
+            # Calculate R² for the velocity fit
+            flat_mask_speed = ~speed_is_ramp
+            speeds_flat_fit = speeds[flat_mask_speed]
+            times_flat_fit = speed_times[flat_mask_speed]
+            speed_predictions = np.polyval(speed_poly_coeffs, times_flat_fit)
+            ss_res = np.sum((speeds_flat_fit - speed_predictions) ** 2)
+            ss_tot = np.sum((speeds_flat_fit - np.mean(speeds_flat_fit)) ** 2)
+            r_squared_velocity = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            
             ax2.plot(t_plot, speed_fit, 'b--', linewidth=2, 
-                    label=f'Best fit (flat): quadratic', zorder=2)
+                    label=f'Best fit (flat): quadratic (R² = {r_squared_velocity:.4f})', zorder=2)
     
     ax2.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
     ax2.set_ylabel('Speed (m/s)', fontsize=14, fontweight='bold')
@@ -784,6 +795,7 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
             speeds = []
             speed_times = []
             speed_is_ramp = []
+            speed_is_oscillation = []
             
             i = 0
             while i < len(times_seq):
@@ -801,6 +813,7 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
                             speeds.append(speed)
                             speed_times.append(current_time)
                             speed_is_ramp.append(current_is_ramp)
+                            speed_is_oscillation.append(False)
                     i += 1
                     
                 elif i == len(times_seq) - 1:
@@ -811,6 +824,7 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
                         speeds.append(speed)
                         speed_times.append(current_time)
                         speed_is_ramp.append(current_is_ramp)
+                        speed_is_oscillation.append(False)
                     i += 1
                     
                 elif i + 1 < len(times_seq) and sensors_seq[i + 1] == current_sensor:
@@ -845,6 +859,7 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
                         speeds.append(speed)
                         speed_times.append(avg_time)
                         speed_is_ramp.append(current_is_ramp)
+                        speed_is_oscillation.append(True)
                     
                     i += 2
                     
@@ -870,12 +885,14 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
                         speeds.append(speed)
                         speed_times.append(current_time)
                         speed_is_ramp.append(current_is_ramp)
+                        speed_is_oscillation.append(False)
                     
                     i += 1
             
             speeds = np.array(speeds)
             speed_times = np.array(speed_times)
             speed_is_ramp = np.array(speed_is_ramp)
+            speed_is_oscillation = np.array(speed_is_oscillation)
             
             # Calculate accelerations from speed fit
             flat_mask_speed = ~speed_is_ramp
@@ -909,6 +926,7 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
                 'speed_times': speed_times,
                 'speeds': speeds,
                 'speed_is_ramp': speed_is_ramp,
+                'speed_is_oscillation': speed_is_oscillation,
                 'accel_from_fit_times': accel_from_fit_times,
                 'accel_from_fit': accel_from_fit
             }
@@ -986,6 +1004,106 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
     avg_acceleration_overall = np.mean(all_accels)
     print(f"[INFO] Average acceleration (all points): {avg_acceleration_overall:.6f} m/s²")
     
+    # Calculate 95% confidence intervals for velocity and acceleration (FLAT REGIONS ONLY)
+    # For n=5 runs, df=4, t-value for 95% CI is approximately 2.776
+    n_runs = len(all_runs_data)
+    t_value = t_dist.ppf(0.975, n_runs - 1)  # 0.975 for two-tailed 95% CI
+    print(f"[INFO] Using t-value = {t_value:.3f} for 95% CI with n={n_runs} runs")
+    
+    # Interpolate velocity data (FLAT REGIONS ONLY, NO OSCILLATIONS) onto common time grid for CI calculation
+    if len(all_runs_data) > 1:
+        # Find common time range across all runs for flat regions (no ramps, no oscillations)
+        all_vel_times_flat = []
+        for run_data in all_runs_data:
+            # Filter to flat regions only (no ramps) AND no oscillations
+            flat_mask = ~run_data['speed_is_ramp']
+            oscillation_mask = ~run_data['speed_is_oscillation']
+            valid_mask = flat_mask & oscillation_mask
+            
+            valid_times = run_data['speed_times'][valid_mask]
+            if len(valid_times) > 0:
+                all_vel_times_flat.extend(valid_times.tolist())
+        
+        if len(all_vel_times_flat) > 0:
+            t_min_vel = min(all_vel_times_flat)
+            t_max_vel = max(all_vel_times_flat)
+            time_grid_vel = np.linspace(t_min_vel, t_max_vel, 200)
+            
+            # Interpolate each run onto common grid (flat regions only, no oscillations)
+            vel_interpolated = []
+            for run_data in all_runs_data:
+                # Filter to flat regions only (no ramps) AND no oscillations
+                flat_mask = ~run_data['speed_is_ramp']
+                oscillation_mask = ~run_data['speed_is_oscillation']
+                valid_mask = flat_mask & oscillation_mask
+                
+                valid_times = run_data['speed_times'][valid_mask]
+                valid_speeds = run_data['speeds'][valid_mask]
+                
+                if len(valid_times) > 0 and len(valid_speeds) > 0:
+                    # Sort data for interpolation
+                    sort_idx = np.argsort(valid_times)
+                    times_sorted = valid_times[sort_idx]
+                    speeds_sorted = valid_speeds[sort_idx]
+                    
+                    # Create interpolation function
+                    interp_func = interp1d(times_sorted, speeds_sorted, 
+                                          kind='linear', bounds_error=False, 
+                                          fill_value=np.nan)
+                    vel_interp = interp_func(time_grid_vel)
+                    vel_interpolated.append(vel_interp)
+            
+            if len(vel_interpolated) > 1:
+                vel_interpolated = np.array(vel_interpolated)
+                # Calculate mean and 95% CI at each time point
+                vel_mean = np.nanmean(vel_interpolated, axis=0)
+                vel_std = np.nanstd(vel_interpolated, axis=0, ddof=1)
+                vel_se = vel_std / np.sqrt(n_runs)
+                vel_ci = t_value * vel_se
+                vel_lower = vel_mean - vel_ci
+                vel_upper = vel_mean + vel_ci
+                print(f"[INFO] 95% CI calculated for velocity using {len(vel_interpolated)} runs (flat regions, no oscillations)")
+    
+    # Interpolate acceleration data onto common time grid for CI calculation
+    # (acceleration is already derived from flat-region velocity fit, so use all accel data)
+    if len(all_runs_data) > 1:
+        all_acc_times = []
+        for run_data in all_runs_data:
+            if run_data['accel_from_fit'] is not None and len(run_data['accel_from_fit_times']) > 0:
+                all_acc_times.extend(run_data['accel_from_fit_times'].tolist())
+        
+        if len(all_acc_times) > 0:
+            t_min_acc = min(all_acc_times)
+            t_max_acc = max(all_acc_times)
+            time_grid_acc = np.linspace(t_min_acc, t_max_acc, 200)
+            
+            # Interpolate each run onto common grid
+            acc_interpolated = []
+            for run_data in all_runs_data:
+                if run_data['accel_from_fit'] is not None and len(run_data['accel_from_fit_times']) > 0:
+                    # Sort data for interpolation
+                    sort_idx = np.argsort(run_data['accel_from_fit_times'])
+                    times_sorted = run_data['accel_from_fit_times'][sort_idx]
+                    accel_sorted = run_data['accel_from_fit'][sort_idx]
+                    
+                    # Create interpolation function
+                    interp_func = interp1d(times_sorted, accel_sorted, 
+                                          kind='linear', bounds_error=False, 
+                                          fill_value=np.nan)
+                    acc_interp = interp_func(time_grid_acc)
+                    acc_interpolated.append(acc_interp)
+            
+            if len(acc_interpolated) > 1:
+                acc_interpolated = np.array(acc_interpolated)
+                # Calculate mean and 95% CI at each time point
+                acc_mean = np.nanmean(acc_interpolated, axis=0)
+                acc_std = np.nanstd(acc_interpolated, axis=0, ddof=1)
+                acc_se = acc_std / np.sqrt(n_runs)
+                acc_ci = t_value * acc_se
+                acc_lower = acc_mean - acc_ci
+                acc_upper = acc_mean + acc_ci
+                print(f"[INFO] 95% CI calculated for acceleration using {len(acc_interpolated)} runs")
+    
     # Configure position plot
     ax1 = axes[0]
     ax1.set_ylabel('Position (m)', fontsize=14, fontweight='bold')
@@ -999,12 +1117,29 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
     # Configure velocity plot
     ax2 = axes[1]
     ax2.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
-    ax2.set_ylabel('Velocity (m/s)', fontsize=14, fontweight='bold')
+    ax2.set_ylabel('Speed (m/s)', fontsize=14, fontweight='bold')
+    
+    # Add 95% CI shaded region for velocity
+    if len(all_runs_data) > 1 and 'vel_lower' in locals():
+        # Filter out NaN values for plotting
+        valid_mask = ~np.isnan(vel_lower) & ~np.isnan(vel_upper)
+        if np.any(valid_mask):
+            ax2.fill_between(time_grid_vel[valid_mask], 
+                            vel_lower[valid_mask], 
+                            vel_upper[valid_mask],
+                            alpha=0.25, color='blue', 
+                            label=f'95% CI (n={n_runs})', zorder=1)
     
     # Add aggregate speed fit line (quadratic fit through all flat region points)
     if len(all_flat_speed_times) > 2:
         # Fit quadratic polynomial to all flat speed data
         speed_poly_coeffs = np.polyfit(all_flat_speed_times, all_flat_speeds, 2)
+        
+        # Calculate R² for the velocity fit
+        speed_predictions = np.polyval(speed_poly_coeffs, all_flat_speed_times)
+        ss_res = np.sum((all_flat_speeds - speed_predictions) ** 2)
+        ss_tot = np.sum((all_flat_speeds - np.mean(all_flat_speeds)) ** 2)
+        r_squared_velocity = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
         
         # Generate fitted curve
         t_min = all_flat_speed_times.min()
@@ -1013,8 +1148,9 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
         speed_fit = np.polyval(speed_poly_coeffs, t_fit)
         
         ax2.plot(t_fit, speed_fit, 'b-', linewidth=2.5, 
-                label='Aggregate fit (flat regions)', zorder=10, alpha=0.8)
+                label=f'Aggregate fit (flat regions, R² = {r_squared_velocity:.4f})', zorder=10, alpha=0.8)
         print(f"[INFO] Velocity fit coefficients (quadratic): {speed_poly_coeffs}")
+        print(f"[INFO] Velocity fit R²: {r_squared_velocity:.4f}")
     
     ax2.legend(loc='best', fontsize=11)
     ax2.grid(True, alpha=0.3, linestyle='--')
@@ -1026,6 +1162,17 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
     ax3.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
     ax3.set_ylabel('Acceleration (m/s²)', fontsize=14, fontweight='bold')
     ax3.set_xlabel('Time (s)', fontsize=14, fontweight='bold')
+    
+    # Add 95% CI shaded region for acceleration
+    if len(all_runs_data) > 1 and 'acc_lower' in locals():
+        # Filter out NaN values for plotting
+        valid_mask = ~np.isnan(acc_lower) & ~np.isnan(acc_upper)
+        if np.any(valid_mask):
+            ax3.fill_between(time_grid_acc[valid_mask], 
+                            acc_lower[valid_mask], 
+                            acc_upper[valid_mask],
+                            alpha=0.25, color='red', 
+                            label=f'95% CI (n={n_runs})', zorder=1)
     
     # Calculate average acceleration and add fitted line through all points
     if len(all_accels) > 0:
