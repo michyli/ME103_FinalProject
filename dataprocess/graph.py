@@ -47,7 +47,8 @@ def load_sensor_data():
             
             sensor_info[sensor_num] = {
                 'distance_m': distance_cm / 100.0,
-                'position_m': height_cm / 100.0,
+                'position_m': distance_cm / 100.0,  # Use distance along track as position
+                'height_m': height_cm / 100.0,  # Keep height separate for reference
                 'activation_threshold': activation_volt,
                 'is_ramp': is_ramp
             }
@@ -167,8 +168,8 @@ def plot_sensor_voltages(data, time, filename=None, save=None):
             ax.plot(time, voltage, label=f'Sensor {sensor_num}', 
                    color=colors[sensor_num-1], alpha=0.7, linewidth=1.5)
     
-    ax.axhline(y=THRESHOLD, color='red', linestyle='--', 
-               linewidth=2, label=f'Threshold ({THRESHOLD}V)', zorder=20)
+    # Note: Custom thresholds from sensor_data.csv are used for activation detection
+    # but are not shown on the plot since each sensor has a different threshold
     
     ax.set_xlabel('Time (s)', fontsize=14, fontweight='bold')
     ax.set_ylabel('Voltage (V)', fontsize=14, fontweight='bold')
@@ -669,6 +670,399 @@ def graph_on_file(csv_file_path, output_dir=None, save=True):
         import traceback
         traceback.print_exc()
         return None
+
+
+def plot_aggregate_runs(csv_files, output_path, experiment_name):
+    """
+    Generate aggregate position, velocity, and acceleration plots for multiple runs.
+    All runs are plotted on the same axes with t=0 as the experiment start time.
+    
+    Args:
+        csv_files: List of paths to CSV files for the same experiment group
+        output_path: Path where the output PNG will be saved
+        experiment_name: Name of the experiment (e.g., "Directional 5mm")
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    if not csv_files:
+        print("[ERROR] No CSV files provided")
+        return False
+    
+    print(f"\n[INFO] Processing {len(csv_files)} runs for {experiment_name}")
+    
+    # Data storage for all runs
+    all_runs_data = []
+    
+    # Process each CSV file
+    for csv_file in csv_files:
+        csv_path = Path(csv_file)
+        if not csv_path.exists():
+            print(f"[WARNING] File not found: {csv_file}")
+            continue
+        
+        try:
+            # Load CSV data
+            with open(csv_path, 'r') as f:
+                first_line = f.readline()
+            
+            if 'Channels' in first_line or 'LabVIEW' in first_line:
+                data = pd.read_csv(csv_path, skiprows=8, index_col=False)
+            else:
+                data = pd.read_csv(csv_path, index_col=False)
+            
+            if 'X_Value' not in data.columns:
+                print(f"[WARNING] No X_Value column in {csv_file}")
+                continue
+            
+            time = data['X_Value'].values
+            
+            # Detect sensor crossings
+            sensor_times_all = {}
+            all_first_entries = []
+            
+            for sensor_num in range(1, 17):
+                sensor_col = f'Sens{sensor_num}'
+                if sensor_col not in data.columns:
+                    continue
+                
+                voltage = data[sensor_col].values
+                
+                if SENSOR_DATA and sensor_num in SENSOR_DATA:
+                    activation_threshold = SENSOR_DATA[sensor_num].get('activation_threshold', THRESHOLD)
+                else:
+                    activation_threshold = THRESHOLD
+                
+                all_critical_times, first_entry, last_exit = find_critical_activation_times(
+                    time, voltage, activation_threshold
+                )
+                
+                if len(all_critical_times) > 0:
+                    sensor_times_all[sensor_num] = all_critical_times
+                    if first_entry is not None:
+                        all_first_entries.append(first_entry)
+            
+            if not all_first_entries:
+                print(f"[WARNING] No sensor activations in {csv_file}")
+                continue
+            
+            # Experiment start time (1 second before first sensor trigger)
+            experiment_start_time = min(all_first_entries)
+            t_zero = experiment_start_time - 1.0
+            
+            # Collect all activation data
+            all_activations = []
+            for sensor_num in range(1, 17):
+                if sensor_num in sensor_times_all and len(sensor_times_all[sensor_num]) > 0:
+                    times = sensor_times_all[sensor_num]
+                    if SENSOR_DATA and sensor_num in SENSOR_DATA:
+                        position = SENSOR_DATA[sensor_num]['position_m']
+                        is_ramp = SENSOR_DATA[sensor_num]['is_ramp']
+                    else:
+                        position = sensor_num * SENSOR_SPACING
+                        is_ramp = sensor_num not in FLAT_REGION_SENSORS
+                    
+                    for t in times:
+                        all_activations.append((t, sensor_num, position, is_ramp))
+            
+            all_activations.sort(key=lambda x: x[0])
+            
+            if len(all_activations) == 0:
+                print(f"[WARNING] No activations in {csv_file}")
+                continue
+            
+            # Extract sequences
+            times_seq = np.array([a[0] for a in all_activations])
+            sensors_seq = np.array([a[1] for a in all_activations])
+            positions_seq = np.array([a[2] for a in all_activations])
+            is_ramp_seq = np.array([a[3] for a in all_activations])
+            
+            # Adjust times to t=0 reference
+            times_seq = times_seq - t_zero
+            
+            # Calculate speeds (same logic as plot_full_experiment)
+            speeds = []
+            speed_times = []
+            speed_is_ramp = []
+            
+            i = 0
+            while i < len(times_seq):
+                current_sensor = sensors_seq[i]
+                current_time = times_seq[i]
+                current_pos = positions_seq[i]
+                current_is_ramp = is_ramp_seq[i]
+                
+                if i == 0:
+                    if len(times_seq) > 1:
+                        dt = times_seq[1] - times_seq[0]
+                        dx = positions_seq[1] - positions_seq[0]
+                        if dt > 0:
+                            speed = abs(dx / dt)
+                            speeds.append(speed)
+                            speed_times.append(current_time)
+                            speed_is_ramp.append(current_is_ramp)
+                    i += 1
+                    
+                elif i == len(times_seq) - 1:
+                    dt = times_seq[i] - times_seq[i-1]
+                    dx = positions_seq[i] - positions_seq[i-1]
+                    if dt > 0:
+                        speed = abs(dx / dt)
+                        speeds.append(speed)
+                        speed_times.append(current_time)
+                        speed_is_ramp.append(current_is_ramp)
+                    i += 1
+                    
+                elif i + 1 < len(times_seq) and sensors_seq[i + 1] == current_sensor:
+                    # Oscillation case
+                    next_time = times_seq[i + 1]
+                    avg_time = (current_time + next_time) / 2.0
+                    
+                    if i > 0:
+                        dt_pre = avg_time - times_seq[i-1]
+                        dx_pre = current_pos - positions_seq[i-1]
+                        speed_pre = abs(dx_pre / dt_pre) if dt_pre > 0 else 0
+                    else:
+                        speed_pre = 0
+                    
+                    if i + 2 < len(times_seq):
+                        dt_post = times_seq[i+2] - avg_time
+                        dx_post = positions_seq[i+2] - current_pos
+                        speed_post = abs(dx_post / dt_post) if dt_post > 0 else 0
+                    else:
+                        speed_post = 0
+                    
+                    if speed_pre > 0 and speed_post > 0:
+                        speed = (speed_pre + speed_post) / 2.0
+                    elif speed_pre > 0:
+                        speed = speed_pre
+                    elif speed_post > 0:
+                        speed = speed_post
+                    else:
+                        speed = 0
+                    
+                    if speed > 0:
+                        speeds.append(speed)
+                        speed_times.append(avg_time)
+                        speed_is_ramp.append(current_is_ramp)
+                    
+                    i += 2
+                    
+                else:
+                    dt_pre = current_time - times_seq[i-1]
+                    dx_pre = current_pos - positions_seq[i-1]
+                    speed_pre = abs(dx_pre / dt_pre) if dt_pre > 0 else 0
+                    
+                    dt_post = times_seq[i+1] - current_time
+                    dx_post = positions_seq[i+1] - current_pos
+                    speed_post = abs(dx_post / dt_post) if dt_post > 0 else 0
+                    
+                    if speed_pre > 0 and speed_post > 0:
+                        speed = (speed_pre + speed_post) / 2.0
+                    elif speed_pre > 0:
+                        speed = speed_pre
+                    elif speed_post > 0:
+                        speed = speed_post
+                    else:
+                        speed = 0
+                    
+                    if speed > 0:
+                        speeds.append(speed)
+                        speed_times.append(current_time)
+                        speed_is_ramp.append(current_is_ramp)
+                    
+                    i += 1
+            
+            speeds = np.array(speeds)
+            speed_times = np.array(speed_times)
+            speed_is_ramp = np.array(speed_is_ramp)
+            
+            # Calculate accelerations from speed fit
+            flat_mask_speed = ~speed_is_ramp
+            accel_from_fit = None
+            accel_from_fit_times = None
+            
+            if np.any(flat_mask_speed) and np.sum(flat_mask_speed) > 2:
+                speeds_flat_fit = speeds[flat_mask_speed]
+                times_flat_fit = speed_times[flat_mask_speed]
+                speed_poly_coeffs = np.polyfit(times_flat_fit, speeds_flat_fit, 2)
+                
+                accel_poly_coeffs = np.polyder(speed_poly_coeffs)
+                
+                accel_from_fit = []
+                accel_from_fit_times = []
+                
+                for i in range(len(speed_times)):
+                    accel_at_time = np.polyval(accel_poly_coeffs, speed_times[i])
+                    accel_from_fit.append(accel_at_time)
+                    accel_from_fit_times.append(speed_times[i])
+                
+                accel_from_fit = np.array(accel_from_fit)
+                accel_from_fit_times = np.array(accel_from_fit_times)
+            
+            # Store data for this run
+            run_data = {
+                'filename': csv_path.name,
+                'times_seq': times_seq,
+                'positions_seq': positions_seq,
+                'is_ramp_seq': is_ramp_seq,
+                'speed_times': speed_times,
+                'speeds': speeds,
+                'speed_is_ramp': speed_is_ramp,
+                'accel_from_fit_times': accel_from_fit_times,
+                'accel_from_fit': accel_from_fit
+            }
+            
+            all_runs_data.append(run_data)
+            print(f"[OK] Processed {csv_path.name}")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to process {csv_file}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    if len(all_runs_data) == 0:
+        print("[ERROR] No runs successfully processed")
+        return False
+    
+    print(f"\n[INFO] Successfully processed {len(all_runs_data)} runs")
+    print(f"[INFO] Generating aggregate plot...")
+    
+    # Create the aggregate plot
+    fig, axes = plt.subplots(3, 1, figsize=(16, 14), sharex=True)
+    
+    # Color map for different runs
+    colors = plt.cm.tab10(np.linspace(0, 1, 10))
+    
+    # Collect all flat speed data and all acceleration data for aggregate fitting
+    all_flat_speed_times = []
+    all_flat_speeds = []
+    all_accel_times = []
+    all_accels = []
+    
+    # Plot each run
+    for idx, run_data in enumerate(all_runs_data):
+        color = colors[idx % 10]
+        run_label = f"Run {idx + 1}"
+        
+        # Position plot
+        ax1 = axes[0]
+        ax1.scatter(run_data['times_seq'], run_data['positions_seq'],
+                   s=40, c=[color], alpha=0.6, marker='o',
+                   edgecolors='black', linewidth=0.5, label=run_label, zorder=3)
+        
+        # Velocity plot
+        ax2 = axes[1]
+        ax2.scatter(run_data['speed_times'], run_data['speeds'],
+                   s=40, c=[color], alpha=0.6, marker='s',
+                   edgecolors='black', linewidth=0.5, label=run_label, zorder=3)
+        
+        # Collect flat region speed data for aggregate fitting
+        flat_mask = ~run_data['speed_is_ramp']
+        if np.any(flat_mask):
+            all_flat_speed_times.extend(run_data['speed_times'][flat_mask].tolist())
+            all_flat_speeds.extend(run_data['speeds'][flat_mask].tolist())
+        
+        # Acceleration plot
+        ax3 = axes[2]
+        if run_data['accel_from_fit'] is not None and len(run_data['accel_from_fit']) > 0:
+            ax3.scatter(run_data['accel_from_fit_times'], run_data['accel_from_fit'],
+                       s=40, c=[color], alpha=0.6, marker='o',
+                       edgecolors='black', linewidth=0.5, label=run_label, zorder=3)
+            
+            # Collect all acceleration data for aggregate statistics
+            all_accel_times.extend(run_data['accel_from_fit_times'].tolist())
+            all_accels.extend(run_data['accel_from_fit'].tolist())
+    
+    # Convert to numpy arrays
+    all_flat_speed_times = np.array(all_flat_speed_times)
+    all_flat_speeds = np.array(all_flat_speeds)
+    all_accel_times = np.array(all_accel_times)
+    all_accels = np.array(all_accels)
+    
+    # Calculate the overall average acceleration across all runs
+    # This should match the average of individual run accelerations
+    avg_acceleration_overall = np.mean(all_accels)
+    print(f"[INFO] Average acceleration (all points): {avg_acceleration_overall:.6f} m/s²")
+    
+    # Configure position plot
+    ax1 = axes[0]
+    ax1.set_ylabel('Position (m)', fontsize=14, fontweight='bold')
+    ax1.set_title(f'{experiment_name} - Aggregate Kinematics (All Runs)', 
+                  fontsize=16, fontweight='bold')
+    ax1.legend(loc='best', fontsize=11)
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.tick_params(labelsize=12)
+    ax1.axvline(x=0, color='red', linestyle='--', linewidth=1.5, alpha=0.5, label='t=0')
+    
+    # Configure velocity plot
+    ax2 = axes[1]
+    ax2.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
+    ax2.set_ylabel('Velocity (m/s)', fontsize=14, fontweight='bold')
+    
+    # Add aggregate speed fit line (quadratic fit through all flat region points)
+    if len(all_flat_speed_times) > 2:
+        # Fit quadratic polynomial to all flat speed data
+        speed_poly_coeffs = np.polyfit(all_flat_speed_times, all_flat_speeds, 2)
+        
+        # Generate fitted curve
+        t_min = all_flat_speed_times.min()
+        t_max = all_flat_speed_times.max()
+        t_fit = np.linspace(t_min, t_max, 500)
+        speed_fit = np.polyval(speed_poly_coeffs, t_fit)
+        
+        ax2.plot(t_fit, speed_fit, 'b-', linewidth=2.5, 
+                label='Aggregate fit (flat regions)', zorder=10, alpha=0.8)
+        print(f"[INFO] Velocity fit coefficients (quadratic): {speed_poly_coeffs}")
+    
+    ax2.legend(loc='best', fontsize=11)
+    ax2.grid(True, alpha=0.3, linestyle='--')
+    ax2.tick_params(labelsize=12)
+    ax2.axvline(x=0, color='red', linestyle='--', linewidth=1.5, alpha=0.5)
+    
+    # Configure acceleration plot
+    ax3 = axes[2]
+    ax3.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
+    ax3.set_ylabel('Acceleration (m/s²)', fontsize=14, fontweight='bold')
+    ax3.set_xlabel('Time (s)', fontsize=14, fontweight='bold')
+    
+    # Calculate average acceleration and add fitted line through all points
+    if len(all_accels) > 0:
+        avg_acceleration = np.mean(all_accels)
+        
+        # Fit linear line through all acceleration points
+        if len(all_accel_times) > 1:
+            accel_poly_coeffs = np.polyfit(all_accel_times, all_accels, 1)
+            
+            # Generate fitted line
+            t_min_accel = all_accel_times.min()
+            t_max_accel = all_accel_times.max()
+            t_accel_fit = np.linspace(t_min_accel, t_max_accel, 500)
+            accel_fit = np.polyval(accel_poly_coeffs, t_accel_fit)
+            
+            ax3.plot(t_accel_fit, accel_fit, 'r-', linewidth=2.5, 
+                    label=f'Aggregate fit (Avg: {avg_acceleration:.6f} m/s²)', 
+                    zorder=10, alpha=0.8)
+            print(f"[INFO] Average acceleration: {avg_acceleration:.6f} m/s²")
+            print(f"[INFO] Acceleration fit coefficients (linear): {accel_poly_coeffs}")
+    
+    ax3.legend(loc='best', fontsize=11)
+    ax3.grid(True, alpha=0.3, linestyle='--')
+    ax3.tick_params(labelsize=12)
+    ax3.axvline(x=0, color='red', linestyle='--', linewidth=1.5, alpha=0.5)
+    
+    plt.tight_layout()
+    
+    # Save the figure
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"[OK] Aggregate plot saved: {output_path}")
+    
+    plt.close(fig)
+    
+    return True
 
 
 if __name__ == "__main__":

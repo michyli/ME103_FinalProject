@@ -2,6 +2,7 @@ from pathlib import Path
 import csv
 import re
 from dataprocess import graph_on_file
+from dataprocess.graph import plot_aggregate_runs
 
 CSV_FILE = "data/No_Tyre_Control/csv/NoTyre_1.csv"
 SAVE_DIR = "output/graphs"
@@ -391,12 +392,174 @@ def batch_process_all_experiments():
     print("="*80)
 
 
+def batch_generate_aggregate_plots():
+    """
+    Generate aggregate plots for all experiment groups.
+    
+    This function creates position, velocity, and acceleration plots
+    for all 5 runs of each experiment group overlaid on the same graph.
+    
+    Experiment groups:
+    - Directional: 5mm, 7mm, 9mm
+    - Symmetrical: 5mm, 7mm, 9mm
+    - NoPattern: 5mm, 7mm, 9mm
+    - NoTyre: control (no thickness variations)
+    """
+    print("="*80)
+    print(" " * 15 + "Batch Generate Aggregate Plots for All Experiment Groups")
+    print("="*80)
+    
+    # Define all experiment groups
+    experiment_groups = [
+        # Directional experiments
+        {
+            'name': 'Directional 5mm',
+            'csv_files': [f"data/Directional_Tyre/csv/Directional_5mm_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/directional/Directional_5mm_aggregate.png'
+        },
+        {
+            'name': 'Directional 7mm',
+            'csv_files': [f"data/Directional_Tyre/csv/Directional_7mm_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/directional/Directional_7mm_aggregate.png'
+        },
+        {
+            'name': 'Directional 9mm',
+            'csv_files': [f"data/Directional_Tyre/csv/Directional_9mm_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/directional/Directional_9mm_aggregate.png'
+        },
+        # Symmetrical experiments
+        {
+            'name': 'Symmetrical 5mm',
+            'csv_files': [f"data/Symmetrical_Tyre/csv/Symmetrical_5mm_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/symmetrical/Symmetrical_5mm_aggregate.png'
+        },
+        {
+            'name': 'Symmetrical 7mm',
+            'csv_files': [f"data/Symmetrical_Tyre/csv/Symmetrical_7mm_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/symmetrical/Symmetrical_7mm_aggregate.png'
+        },
+        {
+            'name': 'Symmetrical 9mm',
+            'csv_files': [f"data/Symmetrical_Tyre/csv/Symmetrical_9mm_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/symmetrical/Symmetrical_9mm_aggregate.png'
+        },
+        # No Pattern experiments
+        {
+            'name': 'No Pattern 5mm',
+            'csv_files': [f"data/No_Pattern/csv/NoPattern_5mm_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/no_pattern/NoPattern_5mm_aggregate.png'
+        },
+        {
+            'name': 'No Pattern 7mm',
+            'csv_files': [f"data/No_Pattern/csv/NoPattern_7mm_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/no_pattern/NoPattern_7mm_aggregate.png'
+        },
+        {
+            'name': 'No Pattern 9mm',
+            'csv_files': [f"data/No_Pattern/csv/NoPattern_9mm_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/no_pattern/NoPattern_9mm_aggregate.png'
+        },
+        # No Tyre control
+        {
+            'name': 'No Tyre (Control)',
+            'csv_files': [f"data/No_Tyre_Control/csv/NoTyre_{i}.csv" for i in range(1, 6)],
+            'output_path': 'result/plots/no_tyre_control/NoTyre_aggregate.png'
+        }
+    ]
+    
+    print(f"\nTotal experiment groups: {len(experiment_groups)}")
+    print("\n" + "-"*80)
+    
+    # Process each experiment group
+    results = []
+    for i, group in enumerate(experiment_groups, 1):
+        print(f"\n[{i}/{len(experiment_groups)}] Processing: {group['name']}")
+        print(f"Output: {group['output_path']}")
+        
+        try:
+            success = plot_aggregate_runs(
+                csv_files=group['csv_files'],
+                output_path=group['output_path'],
+                experiment_name=group['name']
+            )
+            
+            if success:
+                results.append((group['name'], 'Success'))
+                print(f"[OK] Successfully generated aggregate plot for {group['name']}")
+            else:
+                results.append((group['name'], 'Failed'))
+                print(f"[ERROR] Failed to generate aggregate plot for {group['name']}")
+        
+        except Exception as e:
+            results.append((group['name'], f'Error: {str(e)}'))
+            print(f"[ERROR] Exception occurred for {group['name']}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    # Print summary
+    print("\n" + "="*80)
+    print(" " * 25 + "Processing Summary")
+    print("="*80)
+    
+    successful = sum(1 for _, status in results if status == 'Success')
+    failed = len(results) - successful
+    
+    print(f"\nTotal groups:  {len(results)}")
+    print(f"Successful:    {successful}")
+    print(f"Failed:        {failed}")
+    
+    if failed > 0:
+        print("\nFailed groups:")
+        for name, status in results:
+            if status != 'Success':
+                print(f"  - {name}: {status}")
+    
+    print("\n" + "="*80)
+    print(f"\nAggregate plots saved to: result/plots/")
+    print("  - result/plots/directional/")
+    print("  - result/plots/symmetrical/")
+    print("  - result/plots/no_pattern/")
+    print("  - result/plots/no_tyre_control/")
+    print("="*80)
+
+
 if __name__ == "__main__":
     # Single file mode
     # main()
     
-    # Populate acceleration data without saving graphs
-    populate_acceleration_data()
+    # Populate acceleration data without saving graphs (no plots)
+    # populate_acceleration_data()
     
-    # To batch process and save all graphs, uncomment:
-    # batch_process_all_experiments()
+    # ============================================================================
+    # FULL REGENERATION: All individual plots AND aggregate plots
+    # ============================================================================
+    
+    print("\n" + "="*80)
+    print(" " * 20 + "FULL PLOT REGENERATION PIPELINE")
+    print("="*80)
+    print("\nThis will regenerate:")
+    print("  1. All individual voltage time plots")
+    print("  2. All individual position/velocity/acceleration plots")
+    print("  3. All aggregate plots for experiment groups")
+    print("\nTotal files to process: ~50 individual runs + 10 aggregate groups")
+    print("="*80 + "\n")
+    
+    # Step 1: Generate all individual run plots
+    print("\n" + "="*80)
+    print(" " * 25 + "STEP 1: Individual Runs")
+    print("="*80)
+    batch_process_all_experiments()
+    
+    # Step 2: Generate all aggregate plots
+    print("\n" + "="*80)
+    print(" " * 25 + "STEP 2: Aggregate Plots")
+    print("="*80)
+    batch_generate_aggregate_plots()
+    
+    # Final summary
+    print("\n" + "="*80)
+    print(" " * 25 + "PIPELINE COMPLETE!")
+    print("="*80)
+    print("\nAll plots have been regenerated successfully.")
+    print("Check result/plots/ for all output files.")
+    print("="*80 + "\n")
