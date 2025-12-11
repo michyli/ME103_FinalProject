@@ -1212,6 +1212,314 @@ def plot_aggregate_runs(csv_files, output_path, experiment_name):
     return True
 
 
+def plot_individual_kinematics(csv_file_path, output_dir):
+    """
+    Generate three separate plots for position, speed, and acceleration.
+    Each plot is saved as an individual figure with its own x-axis.
+    
+    Args:
+        csv_file_path: Path to CSV file
+        output_dir: Directory to save the three separate plots
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    csv_path = Path(csv_file_path)
+    
+    if not csv_path.exists():
+        print(f"[ERROR] File not found: {csv_path}")
+        return False
+    
+    print(f"\n[INFO] Generating individual kinematics plots for {csv_path.name}")
+    
+    try:
+        # Load CSV data
+        with open(csv_path, 'r') as f:
+            first_line = f.readline()
+        
+        if 'Channels' in first_line or 'LabVIEW' in first_line:
+            data = pd.read_csv(csv_path, skiprows=8, index_col=False)
+        else:
+            data = pd.read_csv(csv_path, index_col=False)
+        
+        if 'X_Value' not in data.columns:
+            print(f"[ERROR] No X_Value column found")
+            return False
+        
+        time = data['X_Value'].values
+        
+        # Detect sensor crossings
+        sensor_times_all = {}
+        all_first_entries = []
+        
+        for sensor_num in range(1, 17):
+            sensor_col = f'Sens{sensor_num}'
+            if sensor_col not in data.columns:
+                continue
+            
+            voltage = data[sensor_col].values
+            
+            if SENSOR_DATA and sensor_num in SENSOR_DATA:
+                activation_threshold = SENSOR_DATA[sensor_num].get('activation_threshold', THRESHOLD)
+            else:
+                activation_threshold = THRESHOLD
+            
+            all_critical_times, first_entry, last_exit = find_critical_activation_times(
+                time, voltage, activation_threshold
+            )
+            
+            if len(all_critical_times) > 0:
+                sensor_times_all[sensor_num] = all_critical_times
+                if first_entry is not None:
+                    all_first_entries.append(first_entry)
+        
+        experiment_start_time = min(all_first_entries) if all_first_entries else None
+        
+        # Process sensor data
+        all_activations = []
+        for sensor_num in range(1, 17):
+            if sensor_num in sensor_times_all and len(sensor_times_all[sensor_num]) > 0:
+                times = sensor_times_all[sensor_num]
+                if SENSOR_DATA and sensor_num in SENSOR_DATA:
+                    position = SENSOR_DATA[sensor_num]['position_m']
+                    is_ramp = SENSOR_DATA[sensor_num]['is_ramp']
+                else:
+                    position = sensor_num * SENSOR_SPACING
+                    is_ramp = sensor_num not in FLAT_REGION_SENSORS
+                
+                for t in times:
+                    all_activations.append((t, sensor_num, position, is_ramp))
+        
+        all_activations.sort(key=lambda x: x[0])
+        
+        if len(all_activations) == 0:
+            print("[ERROR] No sensor activations found")
+            return False
+        
+        times_seq = np.array([a[0] for a in all_activations])
+        sensors_seq = np.array([a[1] for a in all_activations])
+        positions_seq = np.array([a[2] for a in all_activations])
+        is_ramp_seq = np.array([a[3] for a in all_activations])
+        
+        # Calculate speeds (same logic as plot_full_experiment)
+        speeds = []
+        speed_times = []
+        speed_is_ramp = []
+        speed_is_oscillation = []
+        
+        i = 0
+        while i < len(times_seq):
+            current_sensor = sensors_seq[i]
+            current_time = times_seq[i]
+            current_pos = positions_seq[i]
+            current_is_ramp = is_ramp_seq[i]
+            
+            if i == 0:
+                if len(times_seq) > 1:
+                    dt = times_seq[1] - times_seq[0]
+                    dx = positions_seq[1] - positions_seq[0]
+                    if dt > 0:
+                        speeds.append(abs(dx / dt))
+                        speed_times.append(current_time)
+                        speed_is_ramp.append(current_is_ramp)
+                        speed_is_oscillation.append(False)
+                i += 1
+            elif i == len(times_seq) - 1:
+                dt = times_seq[i] - times_seq[i-1]
+                dx = positions_seq[i] - positions_seq[i-1]
+                if dt > 0:
+                    speeds.append(abs(dx / dt))
+                    speed_times.append(current_time)
+                    speed_is_ramp.append(current_is_ramp)
+                    speed_is_oscillation.append(False)
+                i += 1
+            elif i + 1 < len(times_seq) and sensors_seq[i + 1] == current_sensor:
+                next_time = times_seq[i + 1]
+                avg_time = (current_time + next_time) / 2.0
+                
+                dt_pre = avg_time - times_seq[i-1] if i > 0 else 0
+                dx_pre = current_pos - positions_seq[i-1] if i > 0 else 0
+                speed_pre = abs(dx_pre / dt_pre) if dt_pre > 0 else 0
+                
+                dt_post = times_seq[i+2] - avg_time if i + 2 < len(times_seq) else 0
+                dx_post = positions_seq[i+2] - current_pos if i + 2 < len(times_seq) else 0
+                speed_post = abs(dx_post / dt_post) if dt_post > 0 else 0
+                
+                speed = (speed_pre + speed_post) / 2.0 if speed_pre > 0 and speed_post > 0 else (speed_pre if speed_pre > 0 else speed_post)
+                
+                if speed > 0:
+                    speeds.append(speed)
+                    speed_times.append(avg_time)
+                    speed_is_ramp.append(current_is_ramp)
+                    speed_is_oscillation.append(True)
+                i += 2
+            else:
+                dt_pre = current_time - times_seq[i-1]
+                dx_pre = current_pos - positions_seq[i-1]
+                speed_pre = abs(dx_pre / dt_pre) if dt_pre > 0 else 0
+                
+                dt_post = times_seq[i+1] - current_time
+                dx_post = positions_seq[i+1] - current_pos
+                speed_post = abs(dx_post / dt_post) if dt_post > 0 else 0
+                
+                speed = (speed_pre + speed_post) / 2.0 if speed_pre > 0 and speed_post > 0 else (speed_pre if speed_pre > 0 else speed_post)
+                
+                if speed > 0:
+                    speeds.append(speed)
+                    speed_times.append(current_time)
+                    speed_is_ramp.append(current_is_ramp)
+                    speed_is_oscillation.append(False)
+                i += 1
+        
+        speeds = np.array(speeds)
+        speed_times = np.array(speed_times)
+        speed_is_ramp = np.array(speed_is_ramp)
+        speed_is_oscillation = np.array(speed_is_oscillation)
+        
+        # Calculate accelerations
+        flat_mask_speed = ~speed_is_ramp
+        accel_from_fit = None
+        accel_from_fit_times = None
+        speed_poly_coeffs = None
+        
+        if np.any(flat_mask_speed) and np.sum(flat_mask_speed) > 2:
+            speeds_flat = speeds[flat_mask_speed]
+            times_flat = speed_times[flat_mask_speed]
+            speed_poly_coeffs = np.polyfit(times_flat, speeds_flat, 2)
+            accel_poly_coeffs = np.polyder(speed_poly_coeffs)
+            
+            accel_from_fit = np.polyval(accel_poly_coeffs, speed_times)
+            accel_from_fit_times = speed_times
+        
+        # Create output directory
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        base_name = csv_path.stem
+        
+        # Time range for plotting
+        t_min = times_seq.min() - 1.0 if experiment_start_time is None else max(0, experiment_start_time - 1.0)
+        t_max = times_seq.max() + 1.0
+        t_plot = np.linspace(t_min, t_max, 1000)
+        
+        # PLOT 1: Position
+        fig1, ax1 = plt.subplots(1, 1, figsize=(12, 6))
+        flat_mask_pos = ~is_ramp_seq
+        ramp_mask_pos = is_ramp_seq
+        
+        if np.any(flat_mask_pos):
+            ax1.scatter(times_seq[flat_mask_pos], positions_seq[flat_mask_pos], 
+                       s=80, c='blue', marker='o', alpha=0.6, 
+                       edgecolors='black', linewidth=0.8, label='Flat regions', zorder=3)
+        
+        if np.any(ramp_mask_pos):
+            ax1.scatter(times_seq[ramp_mask_pos], positions_seq[ramp_mask_pos], 
+                       s=80, c='orange', marker='o', alpha=0.6, 
+                       edgecolors='black', linewidth=0.8, label='Ramps', zorder=3)
+        
+        ax1.set_xlabel('Time (s)', fontsize=16, fontweight='bold')
+        ax1.set_ylabel('Position (m)', fontsize=16, fontweight='bold')
+        ax1.set_title('Position vs Time', fontsize=18, fontweight='bold')
+        ax1.legend(loc='best', fontsize=13)
+        ax1.grid(True, alpha=0.3, linestyle='--')
+        ax1.tick_params(labelsize=14)
+        ax1.set_xlim(t_min, t_max)
+        
+        plt.tight_layout()
+        fig1_path = output_path / f"{base_name}_position.png"
+        plt.savefig(fig1_path, dpi=300, bbox_inches='tight')
+        print(f"[OK] Position plot saved: {fig1_path}")
+        plt.close(fig1)
+        
+        # PLOT 2: Speed
+        fig2, ax2 = plt.subplots(1, 1, figsize=(12, 6))
+        
+        normal_mask = ~speed_is_oscillation
+        oscillation_mask = speed_is_oscillation
+        
+        if np.any(normal_mask):
+            ax2.scatter(speed_times[normal_mask], speeds[normal_mask], 
+                       s=80, c='green', marker='s', alpha=0.6, 
+                       edgecolors='black', linewidth=0.8, 
+                       label='Normal speed', zorder=3)
+        
+        if np.any(oscillation_mask):
+            ax2.scatter(speed_times[oscillation_mask], speeds[oscillation_mask], 
+                       s=80, c='red', marker='D', alpha=0.6, 
+                       edgecolors='black', linewidth=0.8, 
+                       label='Oscillation speed', zorder=4)
+        
+        if speed_poly_coeffs is not None:
+            speed_fit = np.polyval(speed_poly_coeffs, t_plot)
+            
+            # Calculate R²
+            speeds_flat = speeds[flat_mask_speed]
+            times_flat = speed_times[flat_mask_speed]
+            speed_predictions = np.polyval(speed_poly_coeffs, times_flat)
+            ss_res = np.sum((speeds_flat - speed_predictions) ** 2)
+            ss_tot = np.sum((speeds_flat - np.mean(speeds_flat)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            
+            ax2.plot(t_plot, speed_fit, 'b--', linewidth=3, 
+                    label=f'Best fit (flat): quadratic (R² = {r_squared:.4f})', zorder=2)
+        
+        ax2.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
+        ax2.set_xlabel('Time (s)', fontsize=16, fontweight='bold')
+        ax2.set_ylabel('Speed (m/s)', fontsize=16, fontweight='bold')
+        ax2.set_title('Speed vs Time', fontsize=18, fontweight='bold')
+        ax2.legend(loc='best', fontsize=13)
+        ax2.grid(True, alpha=0.3, linestyle='--')
+        ax2.tick_params(labelsize=14)
+        ax2.set_xlim(t_min, t_max)
+        
+        plt.tight_layout()
+        fig2_path = output_path / f"{base_name}_speed.png"
+        plt.savefig(fig2_path, dpi=300, bbox_inches='tight')
+        print(f"[OK] Speed plot saved: {fig2_path}")
+        plt.close(fig2)
+        
+        # PLOT 3: Acceleration
+        fig3, ax3 = plt.subplots(1, 1, figsize=(12, 6))
+        
+        if accel_from_fit is not None and len(accel_from_fit) > 0:
+            avg_accel = np.mean(accel_from_fit)
+            
+            ax3.scatter(accel_from_fit_times, accel_from_fit, 
+                       s=80, c='orange', marker='o', alpha=0.6, 
+                       edgecolors='black', linewidth=0.8, 
+                       label=f'Acceleration from speed fit (Avg: {avg_accel:.6f} m/s²)', zorder=3)
+            
+            if len(accel_from_fit) > 1:
+                accel_fit_coeffs = np.polyfit(accel_from_fit_times, accel_from_fit, 1)
+                accel_fit_line = np.polyval(accel_fit_coeffs, t_plot)
+                ax3.plot(t_plot, accel_fit_line, 'r-', linewidth=3, 
+                        label='Best fit', zorder=2)
+        
+        ax3.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
+        ax3.set_xlabel('Time (s)', fontsize=16, fontweight='bold')
+        ax3.set_ylabel('Acceleration (m/s²)', fontsize=16, fontweight='bold')
+        ax3.set_title('Acceleration vs Time', fontsize=18, fontweight='bold')
+        ax3.legend(loc='best', fontsize=13)
+        ax3.grid(True, alpha=0.3, linestyle='--')
+        ax3.tick_params(labelsize=14)
+        ax3.set_xlim(t_min, t_max)
+        
+        plt.tight_layout()
+        fig3_path = output_path / f"{base_name}_acceleration.png"
+        plt.savefig(fig3_path, dpi=300, bbox_inches='tight')
+        print(f"[OK] Acceleration plot saved: {fig3_path}")
+        plt.close(fig3)
+        
+        print(f"[SUCCESS] All individual plots generated successfully!")
+        return True
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to generate plots: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 if __name__ == "__main__":
     import sys
     
