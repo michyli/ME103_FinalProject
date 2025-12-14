@@ -1418,7 +1418,7 @@ def plot_individual_kinematics(csv_file_path, output_dir):
                        edgecolors='black', linewidth=0.8, label='Ramps', zorder=3)
         
         ax1.set_xlabel('Time (s)', fontsize=16, fontweight='bold')
-        ax1.set_ylabel('Position (m)', fontsize=16, fontweight='bold')
+        ax1.set_ylabel('X-Position (m)', fontsize=16, fontweight='bold')
         ax1.set_title('Position vs Time', fontsize=18, fontweight='bold')
         ax1.legend(loc='best', fontsize=13)
         ax1.grid(True, alpha=0.3, linestyle='--')
